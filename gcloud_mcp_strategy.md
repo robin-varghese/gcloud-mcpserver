@@ -198,6 +198,87 @@ npx @modelcontextprotocol/inspector docker run -i --rm \
 
 The Inspector will launch a web UI where you can:
 *   View all available tools
+
+### Step 4: Use the Interactive Client (Recommended)
+
+The **`gcloud_mcp_interactive.py`** script provides a powerful NLP-powered REPL interface to interact with the GCloud MCP server using natural language.
+
+#### Features
+- 🤖 **Natural Language Processing**: Use plain English instead of memorizing gcloud syntax
+- 🔄 **Multi-Step Operations**: Execute complex workflows (stop, upgrade, restart) in one command
+- ❌ **Smart Error Handling**: Friendly, actionable error messages with suggestions
+- 🧠 **Machine Type Intelligence**: Understands VM size progressions (e2-micro → e2-small → e2-medium)
+- 💡 **Context-Aware Help**: Prompts you for missing information instead of failing
+
+#### Quick Start
+```bash
+# Set your Google API Key (for Gemini NLP)
+export GOOGLE_API_KEY="your-api-key-here"
+
+# Run the interactive client
+python gcloud_mcp_interactive.py
+```
+
+#### Usage Examples
+
+**Simple Commands:**
+```
+gcloud> list all vms in my project
+gcloud> show me all storage buckets
+gcloud> what projects do I have access to
+```
+
+**VM Management:**
+```
+gcloud> create a small vm named test-vm in zone us-central1-a
+gcloud> delete instance test-vm in zone us-central1-a
+```
+
+**Multi-Step Operations:**
+```
+gcloud> stop, upgrade to e2-small, and restart instance-1 in zone us-central1-a
+```
+This executes 3 steps automatically:
+1. Stops the instance
+2. Changes machine type to e2-small
+3. Restarts the instance
+
+**Error Handling Example:**
+```
+gcloud> upgrade instance-1 to next bigger server
+❌ Oops! The instance zone is missing.
+💡 Please specify the zone where your instance is located.
+   Example: us-central1-a, europe-west1-b
+   Try: 'list all vms' to see zones.
+```
+
+#### How It Works
+1. **Gemini Translation**: Your natural language request is sent to Gemini (2.5 Flash)
+2. **Command Generation**: Gemini generates valid gcloud command arguments
+3. **Execution**: Commands are executed via the MCP server
+4. **Smart Output**: Results are displayed with friendly formatting
+
+#### Configuration
+The client automatically:
+- Prompts for API key if `GOOGLE_API_KEY` is not set
+- Connects to the Docker-based MCP server
+- Handles authentication via host credential sharing
+
+#### Alternative: Automated Test Script
+For pre-defined test scenarios:
+```bash
+python gcloud_mcp_test.py
+```
+
+## 8. Verification Results
+*   **Authentication**: Successfully verified using host credential sharing (`-v ~/.config/gcloud:/root/.config/gcloud`).
+*   **Functionality**:
+    *   `projects list`: Successfully listed available projects.
+    *   `compute instances list`: Successfully listed VMs (e.g., `instance-20251125-214325`).
+    *   `storage buckets list`: Successfully listed GCS buckets.
+*   **Fixes Applied**:
+    *   Updated volume mount to be **read-write** (removed `:ro`) to allow gcloud to write logs/lock files.
+    *   Corrected tool argument format in client scripts.
 *   Test tool calls interactively
 *   Inspect request/response payloads
 *   Verify that your host credentials are working

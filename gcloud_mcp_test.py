@@ -28,7 +28,6 @@ async def run_test():
         async with ClientSession(read, write) as session:
             # Initialize the connection
             await session.initialize()
-            print("\n--- Connected to GCloud MCP Server ---")
 
             # List available tools
             print("\n[1] Listing Available Tools:")

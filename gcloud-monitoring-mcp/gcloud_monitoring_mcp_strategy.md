@@ -420,9 +420,282 @@ Agent: "Are there any firing alerts in my project?"
 Tool: check_alert_status()
 ```
 
+
+---
+
+## 10. Implementation Notes & Troubleshooting
+
+This section documents the actual implementation experience, common issues encountered, and their solutions.
+
+### Actual Implementation (Python-based)
+
+The final implementation uses a **Python-based MCP server** with the following structure:
+
+**Files**:
+- `monitoring_mcp_server.py` - Main MCP server implementation
+- `monitoring_interactive.py` - Interactive client with NLP translation
+- `requirements.txt` - Python dependencies
+- `Dockerfile` - Container definition
+
+**Key Dependencies**:
+```txt
+mcp>=1.0.0
+google-cloud-monitoring>=2.18.0
+google-cloud-logging>=3.9.0
+```
+
+### Critical Bug Fixes & Solutions
+
+During implementation, several critical issues were encountered and resolved:
+
+#### 1. LoggingServiceV2Client Import Error
+
+**Problem**: `module 'google.cloud.logging_v2' has no attribute 'LoggingServiceV2Client'`
+
+**Root Cause**: In `google-cloud-logging` v3.9.0+, the client class is not directly exposed at the package level.
+
+**Solution**: Import from the correct submodule:
+```python
+from google.cloud.logging_v2.services.logging_service_v2 import LoggingServiceV2Client
+client = LoggingServiceV2Client()
+```
+
+#### 2. Severity Field AttributeError
+
+**Problem**: `'int' object has no attribute 'name'` when accessing `entry.severity.name`
+
+**Root Cause**: The `severity` field in log entries is an integer enum value, not an object with a `.name` attribute.
+
+**Solution**: Convert directly to string:
+```python
+"severity": str(entry.severity)  # Returns the integer enum value as string
+```
+
+#### 3. Protobuf Serialization Errors
+
+**Problem**: Multiple JSON serialization errors:
+- `Object of type MapComposite is not JSON serializable`
+- `Object of type ScalarMapContainer is not JSON serializable`
+
+**Root Cause**: Google Cloud client libraries return protobuf wrapper types (`MapComposite`, `RepeatedComposite`, `ScalarMap`, etc.) that cannot be directly serialized to JSON.
+
+**Solution**: Implement a recursive conversion helper:
+```python
+from proto.marshal.collections.maps import MapComposite
+from proto.marshal.collections.repeated import RepeatedComposite
+
+def proto_to_dict(obj):
+    """Recursively convert protobuf types to native Python types."""
+    # Handle proto-plus MapComposite and RepeatedComposite
+    if isinstance(obj, MapComposite):
+        return {k: proto_to_dict(v) for k, v in obj.items()}
+    if isinstance(obj, RepeatedComposite):
+        return [proto_to_dict(v) for v in obj]
+    
+    # Handle any dict-like object (including ScalarMap, MessageMap, etc.)
+    if hasattr(obj, 'items') and not isinstance(obj, dict):
+        try:
+            return {k: proto_to_dict(v) for k, v in obj.items()}
+        except (TypeError, AttributeError):
+            pass
+    
+    # Handle any list-like object (including RepeatedScalarFieldContainer, etc.)
+    if hasattr(obj, '__iter__') and not isinstance(obj, (str, dict, bytes)):
+        try:
+            return [proto_to_dict(v) for v in obj]
+        except (TypeError, AttributeError):
+            pass
+    
+    # Handle standard dict and list
+    if isinstance(obj, dict):
+        return {k: proto_to_dict(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [proto_to_dict(v) for v in obj]
+    
+    return obj
+```
+
+**Usage**: Apply to all protobuf fields before JSON serialization:
+```python
+log_entries.append({
+    "resource": {
+        "labels": proto_to_dict(entry.resource.labels)  # Convert MapComposite
+    },
+    "json_payload": proto_to_dict(entry.json_payload) if entry.json_payload else None
+})
+```
+
+#### 4. Optional Filter Parameter
+
+**Problem**: `'filter' is a required property` validation error when filter is omitted
+
+**Root Cause**: The tool schema marked `filter` as required, but some queries don't need filters.
+
+**Solution**: 
+1. Make filter optional in the schema:
+```python
+"required": ["project_id"]  # Remove "filter" from required list
+```
+
+2. Handle `None`/`null` values from JSON:
+```python
+filter_val = arguments.get("filter", "")
+if filter_val is None:  # Handle null from JSON
+    filter_val = ""
+```
+
+### Testing Strategy
+
+**Automated Testing**:
+Created test scripts to verify functionality:
+```python
+# test_monitoring_fix.py - Direct API testing
+async def test_query_logs():
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            result = await session.call_tool("query_logs", arguments={...})
+```
+
+**Interactive Testing**:
+The `monitoring_interactive.py` script provides:
+- Natural language query translation using Gemini
+- Interactive REPL for testing
+- Pretty-printed results
+- Error handling and user feedback
+
+### Docker Build Optimization
+
+**Final Dockerfile**:
+```dockerfile
+FROM python:3.11-slim
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    gnupg \
+    apt-transport-https \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Google Cloud SDK
+RUN echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | \
+    tee -a /etc/apt/sources.list.d/google-cloud-sdk.list && \
+    curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | \
+    gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg && \
+    apt-get update && \
+    apt-get install -y google-cloud-cli && \
+    rm -rf /var/lib/apt/lists/*
+
+# Set working directory
+WORKDIR /app
+
+# Copy requirements and install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy server code
+COPY monitoring_mcp_server.py .
+
+# Run the MCP server
+CMD ["python", "monitoring_mcp_server.py"]
+```
+
+### Performance Considerations
+
+1. **Client Initialization**: Create Google Cloud clients inside async functions to avoid blocking
+2. **Pagination**: Implement proper pagination for large result sets
+3. **Timeouts**: Set reasonable timeouts for API calls
+4. **Caching**: Consider caching metric descriptors (they rarely change)
+
+### Security Best Practices
+
+1. **Credential Isolation**: Never copy credentials into the Docker image
+2. **Read-only Mounts**: Use read-only volume mounts where possible (note: gcloud config needs write access for lock files)
+3. **Network Isolation**: Use `--network host` only when necessary
+4. **Minimal Permissions**: Grant only required IAM roles to the authenticated user/service account
+
+### Common Troubleshooting
+
+**Issue**: "Permission denied" errors
+- **Solution**: Verify IAM roles with `gcloud projects get-iam-policy PROJECT_ID`
+
+**Issue**: "API not enabled" errors
+- **Solution**: Enable required APIs:
+  ```bash
+  gcloud services enable monitoring.googleapis.com logging.googleapis.com
+  ```
+
+**Issue**: Container can't access GCP APIs
+- **Solution**: Ensure `--network host` flag is set and credentials are mounted correctly
+
+**Issue**: "No log entries found" when logs exist
+- **Solution**: Check the time range and filter syntax. Use empty filter `""` to get all logs.
+
+### Lessons Learned
+
+1. **Use isinstance() checks**: String-based type checking is fragile; use proper `isinstance()` checks
+2. **Handle protobuf types explicitly**: Always convert protobuf types before JSON serialization
+3. **Make parameters optional when sensible**: Not all queries need filters or specific time ranges
+4. **Test with real data**: Mock data doesn't expose protobuf serialization issues
+5. **Document API version dependencies**: Client library behavior changes between versions
+6. **Keep source files in version control**: The `monitoring_mcp_server.py` file was accidentally deleted during development - always commit working code
+7. **Rebuild Docker images after code changes**: Changes to Python files require rebuilding the Docker image to take effect
+
+### Interactive Client Enhancements
+
+The `monitoring_interactive.py` client was enhanced to provide better user experience:
+
+**Features**:
+- **Natural Language Processing**: Uses Gemini AI to translate user queries into MCP tool calls
+- **Full Log Details**: Displays complete log information including:
+  - Log name and timestamp
+  - Severity level
+  - Resource type and labels
+  - Full text payloads
+  - Complete JSON payloads with proper formatting
+- **Better Error Reporting**: Shows detailed error messages and stack traces for debugging
+- **Interactive REPL**: Continuous query interface with examples
+
+**Example Output**:
+```
+================================================================================
+Found 20 log entries
+================================================================================
+
+Entry #1:
+  Log Name: projects/my-project/logs/cloudaudit.googleapis.com%2Factivity
+  Timestamp: 2025-11-27T20:45:41.694716+00:00
+  Severity: 200
+  Resource Type: gce_instance
+  Resource Labels:
+    project_id: my-project
+    zone: us-central1-a
+    instance_id: 1234567890
+  JSON Payload:
+    {
+        "protoPayload": {
+            "methodName": "v1.compute.instances.start",
+            "resourceName": "projects/my-project/zones/us-central1-a/instances/my-vm"
+        }
+    }
+```
+
+### File Recovery Notes
+
+If `monitoring_mcp_server.py` is missing or corrupted, it can be recreated with the following key components:
+
+1. **Imports**: Include `MapComposite` and `RepeatedComposite` from `proto.marshal.collections`
+2. **proto_to_dict() helper**: Must handle all protobuf container types generically
+3. **LoggingServiceV2Client import**: Must import from `google.cloud.logging_v2.services.logging_service_v2`
+4. **Null handling**: Filter parameter must handle `None`/`null` values from JSON
+5. **Error wrapping**: All errors should be returned as JSON with `{"error": "message"}` format
+
+
 ---
 
 ## Appendix: Service Account Alternative (For Production/Automation)
+
 
 If you need to use a **service account** instead of host credentials (e.g., for CI/CD pipelines, automated systems), follow this alternative approach:
 

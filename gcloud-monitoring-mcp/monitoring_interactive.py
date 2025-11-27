@@ -202,9 +202,38 @@ async def run_interactive_session():
                                                 
                                     elif tool_name == "query_logs":
                                         count = data.get("log_entry_count", 0)
-                                        print(f"\nFound {count} log entries.")
-                                        for entry in data.get("log_entries", [])[:3]:
-                                            print(f"[{entry['severity']}] {entry['timestamp']}: {entry.get('text_payload') or 'JSON Payload'}")
+                                        print(f"\n{'='*80}")
+                                        print(f"Found {count} log entries")
+                                        print(f"{'='*80}\n")
+                                        
+                                        for i, entry in enumerate(data.get("log_entries", []), 1):
+                                            print(f"Entry #{i}:")
+                                            print(f"  Log Name: {entry.get('log_name', 'N/A')}")
+                                            print(f"  Timestamp: {entry.get('timestamp', 'N/A')}")
+                                            print(f"  Severity: {entry.get('severity', 'N/A')}")
+                                            print(f"  Resource Type: {entry.get('resource', {}).get('type', 'N/A')}")
+                                            
+                                            # Show resource labels
+                                            labels = entry.get('resource', {}).get('labels', {})
+                                            if labels:
+                                                print(f"  Resource Labels:")
+                                                for k, v in labels.items():
+                                                    print(f"    {k}: {v}")
+                                            
+                                            # Show text payload
+                                            if entry.get('text_payload'):
+                                                print(f"  Text Payload:")
+                                                print(f"    {entry['text_payload']}")
+                                            
+                                            # Show JSON payload
+                                            if entry.get('json_payload'):
+                                                print(f"  JSON Payload:")
+                                                payload_str = json.dumps(entry['json_payload'], indent=4)
+                                                for line in payload_str.split('\n'):
+                                                    print(f"    {line}")
+                                            
+                                            print()  # Blank line between entries
+
                                             
                                     elif tool_name == "list_metrics":
                                         count = data.get("metric_count", 0)
@@ -214,8 +243,13 @@ async def run_interactive_session():
                                     else:
                                         print(json.dumps(data, indent=2))
                                         
-                                except json.JSONDecodeError:
+                                except json.JSONDecodeError as e:
+                                    print(f"JSON decode error: {e}")
                                     print(content.text)
+                                except Exception as e:
+                                    print(f"Error processing result: {e}")
+                                    import traceback
+                                    traceback.print_exc()
                             else:
                                 print(f"[{content.type} content]")
                                 
@@ -223,6 +257,8 @@ async def run_interactive_session():
                         print("\nOperation cancelled.")
                     except Exception as e:
                         print(f"Error: {str(e)}")
+                        import traceback
+                        traceback.print_exc()
                         
     except Exception as e:
         print(f"\nFailed to connect to MCP server: {e}")

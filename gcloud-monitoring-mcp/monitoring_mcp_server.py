@@ -18,10 +18,45 @@ from mcp.types import Tool, TextContent
 
 from google.cloud import monitoring_v3, logging_v2
 from google.api_core import datetime_helpers
+from proto.marshal.collections.maps import MapComposite
+from proto.marshal.collections.repeated import RepeatedComposite
 
 
 # Initialize MCP server
 app = Server("gcloud-monitoring-mcp")
+
+
+def proto_to_dict(obj):
+    """Recursively convert protobuf types to native Python types."""
+    # Handle proto-plus MapComposite and RepeatedComposite
+    if isinstance(obj, MapComposite):
+        return {k: proto_to_dict(v) for k, v in obj.items()}
+    if isinstance(obj, RepeatedComposite):
+        return [proto_to_dict(v) for v in obj]
+    
+    # Handle any dict-like object (including ScalarMap, MessageMap, etc.)
+    # Check if it has items() method and is not a plain dict
+    if hasattr(obj, 'items') and not isinstance(obj, dict):
+        try:
+            return {k: proto_to_dict(v) for k, v in obj.items()}
+        except (TypeError, AttributeError):
+            pass
+    
+    # Handle any list-like object (including RepeatedScalarFieldContainer, etc.)
+    # Check if it's iterable but not a string or dict
+    if hasattr(obj, '__iter__') and not isinstance(obj, (str, dict, bytes)):
+        try:
+            return [proto_to_dict(v) for v in obj]
+        except (TypeError, AttributeError):
+            pass
+    
+    # Handle standard dict and list
+    if isinstance(obj, dict):
+        return {k: proto_to_dict(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [proto_to_dict(v) for v in obj]
+    
+    return obj
 
 
 @app.list_tools()
@@ -58,7 +93,7 @@ async def list_tools() -> List[Tool]:
         ),
         Tool(
             name="query_logs",
-            description="Query log entries from Cloud Logging. Returns matching log entries.",
+            description="Query log entries from Cloud Logging. Returns matching log entries with full details.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -68,7 +103,7 @@ async def list_tools() -> List[Tool]:
                     },
                     "filter": {
                         "type": "string",
-                        "description": "Log filter query (e.g., 'resource.type=\"gce_instance\" AND severity>=ERROR')"
+                        "description": "Log filter query (e.g., 'resource.type=\"gce_instance\" AND severity>=ERROR'). Use empty string to get all logs."
                     },
                     "hours_ago": {
                         "type": "integer",
@@ -81,7 +116,7 @@ async def list_tools() -> List[Tool]:
                         "default": 100
                     }
                 },
-                "required": ["project_id", "filter"]
+                "required": ["project_id"]
             }
         ),
         Tool(
@@ -120,9 +155,13 @@ async def call_tool(name: str, arguments: Any) -> List[TextContent]:
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
         
         elif name == "query_logs":
+            filter_val = arguments.get("filter", "")
+            # Handle null/None values from JSON
+            if filter_val is None:
+                filter_val = ""
             result = await query_logs(
                 project_id=arguments["project_id"],
-                filter_str=arguments["filter"],
+                filter_str=filter_val,
                 hours_ago=arguments.get("hours_ago", 24),
                 limit=arguments.get("limit", 100)
             )
@@ -141,7 +180,7 @@ async def call_tool(name: str, arguments: Any) -> List[TextContent]:
     except Exception as e:
         error_msg = f"Error executing {name}: {str(e)}"
         print(f"ERROR: {error_msg}", file=sys.stderr)
-        return [TextContent(type="text", text=error_msg)]
+        return [TextContent(type="text", text=json.dumps({"error": error_msg}, indent=2))]
 
 
 async def query_time_series(
@@ -214,6 +253,7 @@ async def query_time_series(
         return {"error": str(e)}
 
 
+
 async def query_logs(
     project_id: str,
     filter_str: str,
@@ -222,7 +262,9 @@ async def query_logs(
 ) -> Dict[str, Any]:
     """Query log entries from Cloud Logging."""
     try:
-        client = logging_v2.LoggingServiceV2Client()
+        # Use the specific client class that we will import or access via the correct path
+        from google.cloud.logging_v2.services.logging_service_v2 import LoggingServiceV2Client
+        client = LoggingServiceV2Client()
         project_name = f"projects/{project_id}"
         
         # Query logs
@@ -242,12 +284,12 @@ async def query_logs(
                 "log_name": entry.log_name,
                 "resource": {
                     "type": entry.resource.type,
-                    "labels": dict(entry.resource.labels)
+                    "labels": proto_to_dict(entry.resource.labels)
                 },
                 "timestamp": entry.timestamp.isoformat() if entry.timestamp else None,
-                "severity": entry.severity.name,
+                "severity": str(entry.severity),
                 "text_payload": entry.text_payload if entry.text_payload else None,
-                "json_payload": dict(entry.json_payload) if entry.json_payload else None
+                "json_payload": proto_to_dict(entry.json_payload) if entry.json_payload else None
             })
             
             # Respect limit
